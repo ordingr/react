@@ -1,0 +1,742 @@
+
+import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { Camera, Square, StopCircle, Download, Loader2, Clock, Lightbulb, Book, ListTodo, Calendar } from 'lucide-react';
+import OpenAI from 'openai';
+import { createWorker } from 'tesseract.js';
+import type { Worker, LoggerMessage } from 'tesseract.js';
+
+interface CaptureRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface MeetingSummary {
+  minutes: string;
+  insights: string;
+  glossary: string;
+  tasks: string;
+  nextSession: string;
+}
+
+function App() {
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [captureRegion, setCaptureRegion] = useState<CaptureRegion>({
+    x: 500,
+    y: 1250,
+    width: 1800,
+    height: 200
+  });
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const capturedFrames = useRef<ImageData[]>([]);
+  const [currentText, setCurrentText] = useState<string>('');
+  const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null);
+  const [worker, setWorker] = useState<Worker | null>(null);
+  const [isOcrReady, setIsOcrReady] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true);
+  const [initError, setInitError] = useState<string | null>(null);
+  const isCapturingRef = useRef(false);
+  const previewCanvasRef = useRef<HTMLCanvasElement>(null);
+  const isFirstFrameRef = useRef(true);
+  const isReadyToProcessRef = useRef(false);
+  const lastImageDataRef = useRef<ImageData | null>(null);
+
+  const handleNumberInput = (e: React.ChangeEvent<HTMLInputElement>, field: keyof CaptureRegion) => {
+    const value = e.target.value === '' ? 0 : parseInt(e.target.value, 10);
+    if (!isNaN(value)) {
+      setCaptureRegion(prev => ({
+        ...prev,
+        [field]: value
+      }));
+    }
+  };
+
+  const startCapture = async () => {
+    try {
+      console.log('Starting capture...');
+      isFirstFrameRef.current = true;
+      isReadyToProcessRef.current = false;
+      lastImageDataRef.current = null;
+      capturedFrames.current = [];
+      setCurrentText('');
+      
+      const mediaStream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          cursor: "always" as const,
+          displaySurface: 'monitor'
+        } as MediaTrackConstraints,
+        audio: false
+      });
+      
+      console.log('Got media stream');
+      setStream(mediaStream);
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = mediaStream;
+        
+        // Wait for video to be ready
+        await new Promise<void>((resolve, reject) => {
+          if (!videoRef.current) {
+            reject(new Error('Video ref not available'));
+            return;
+          }
+          
+          const video = videoRef.current;
+          
+          video.onloadedmetadata = () => {
+            console.log('Video metadata loaded, dimensions:', {
+              width: video.videoWidth,
+              height: video.videoHeight
+            });
+            video.play()
+              .then(() => {
+                console.log('Video playback started');
+                resolve();
+              })
+              .catch(err => {
+                console.error('Error playing video:', err);
+                reject(err);
+              });
+          };
+          
+          video.onerror = (e) => {
+            console.error('Video error:', e);
+            reject(new Error('Video failed to load'));
+          };
+        });
+        
+        console.log('Video initialized successfully');
+        isCapturingRef.current = true;
+        setIsCapturing(true);
+        capturedFrames.current = [];
+        setCurrentText('');
+        
+        console.log('Starting frame capture...');
+        startFrameCapture();
+      }
+    } catch (err) {
+      console.error("Error starting capture:", err);
+      isCapturingRef.current = false;
+      setIsCapturing(false);
+    }
+  };
+
+  const extractText = async (imageUrl: string) => {
+    if (!worker || !isOcrReady) {
+      console.log('Worker not ready:', { worker: !!worker, isOcrReady });
+      return null;
+    }
+    
+    try {
+      setIsProcessing(true);
+      console.log('Starting text extraction...');
+      const { data } = await worker.recognize(imageUrl);
+      console.log('OCR result:', data);
+      return data.text;
+    } catch (error) {
+      console.error('Error extracting text:', error);
+      return null;
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Add this utility function for image comparison
+  const getImageString = (imageData: ImageData): string => {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+    
+    canvas.width = imageData.width;
+    canvas.height = imageData.height;
+    ctx.putImageData(imageData, 0, 0);
+    
+    return canvas.toDataURL('image/png');
+  };
+
+  // Add this function to calculate pHash
+  const calculatePHash = (imageData: ImageData): string => {
+    // Create a small canvas for the pHash
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return '';
+
+    // Resize to 8x8 for pHash calculation
+    canvas.width = 8;
+    canvas.height = 8;
+    
+    // Create temporary canvas to hold original image
+    const tempCanvas = document.createElement('canvas');
+    const tempCtx = tempCanvas.getContext('2d');
+    if (!tempCtx) return '';
+    
+    tempCanvas.width = imageData.width;
+    tempCanvas.height = imageData.height;
+    tempCtx.putImageData(imageData, 0, 0);
+    
+    // Draw resized image
+    ctx.drawImage(tempCanvas, 0, 0, imageData.width, imageData.height, 0, 0, 8, 8);
+    
+    // Convert to grayscale and get pixel data
+    const pixels = ctx.getImageData(0, 0, 8, 8).data;
+    const grayPixels = new Array(64);
+    
+    // Calculate grayscale values
+    for (let i = 0; i < pixels.length; i += 4) {
+      const idx = Math.floor(i / 4);
+      grayPixels[idx] = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
+    }
+    
+    // Calculate average value
+    const average = grayPixels.reduce((sum, val) => sum + val, 0) / 64;
+    
+    // Generate hash string
+    const hash = grayPixels.map(val => (val > average ? '1' : '0')).join('');
+    
+    return hash;
+  };
+
+  // Add this function to compare pHashes
+  const comparePHashes = (hash1: string, hash2: string): number => {
+    let diffCount = 0;
+    for (let i = 0; i < hash1.length; i++) {
+      if (hash1[i] !== hash2[i]) {
+        diffCount++;
+      }
+    }
+    return diffCount;
+  };
+
+  // Update the processFrame function
+  const processFrame = async (imageData: ImageData): Promise<boolean> => {
+    const timestamp = new Date().toISOString();
+    console.group(`=== Frame Processing at ${timestamp} ===`);
+    
+    try {
+      // Update preview
+      if (previewCanvasRef.current) {
+        const previewCtx = previewCanvasRef.current.getContext('2d', { willReadFrequently: true });
+        if (previewCtx) {
+          previewCanvasRef.current.width = captureRegion.width;
+          previewCanvasRef.current.height = captureRegion.height;
+          previewCtx.putImageData(imageData, 0, 0);
+        }
+      }
+
+      if (isProcessing) {
+        console.log('Still processing previous frame, skipping...');
+        return false;
+      }
+
+      // Handle first frame
+      if (isFirstFrameRef.current) {
+        console.log('📸 Processing first frame');
+        try {
+          setIsProcessing(true);
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (!ctx) {
+            console.error('Failed to get canvas context');
+            return false;
+          }
+
+          canvas.width = captureRegion.width;
+          canvas.height = captureRegion.height;
+          ctx.putImageData(imageData, 0, 0);
+          ctx.filter = 'contrast(1.4) brightness(1.1) grayscale(1)';
+          ctx.drawImage(canvas, 0, 0);
+          
+          const imageUrl = canvas.toDataURL('image/png', 1.0);
+          const text = await extractText(imageUrl);
+          console.log('First frame text:', text);
+          
+          if (text && text.trim()) {
+            const newText = text.trim();
+            setCurrentText(newText);
+            capturedFrames.current = [imageData];
+            lastImageDataRef.current = imageData;
+            isFirstFrameRef.current = false;
+            isReadyToProcessRef.current = true;
+            console.log('First frame processed successfully:', {
+              text: newText,
+              framesCount: capturedFrames.current.length
+            });
+            return true;
+          }
+          return false;
+        } finally {
+          setIsProcessing(false);
+        }
+      }
+
+      // Skip if not ready to process
+      if (!isReadyToProcessRef.current) {
+        console.log('Not ready to process frames yet');
+        return false;
+      }
+
+      // For subsequent frames, perform comparison
+      if (!lastImageDataRef.current) {
+        console.error('Last image data is null, but not first frame');
+        return false;
+      }
+
+      // Calculate pHash for current and last frame
+      const currentHash = calculatePHash(imageData);
+      const lastHash = calculatePHash(lastImageDataRef.current);
+      
+      // Compare hashes
+      const hashDifference = comparePHashes(currentHash, lastHash);
+      const isDifferent = hashDifference > 5;
+
+      console.log('📊 Frame Analysis:', {
+        currentHash,
+        lastHash,
+        differenceCount: hashDifference,
+        threshold: 5,
+        isDifferent,
+        frameCount: capturedFrames.current.length
+      });
+
+      if (!isDifferent) {
+        console.log('❌ No significant changes detected');
+        return false;
+      }
+
+      // Process frame with significant changes
+      try {
+        setIsProcessing(true);
+        console.log('✅ Changes detected - processing frame');
+        
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) return false;
+
+        canvas.width = captureRegion.width;
+        canvas.height = captureRegion.height;
+        
+        ctx.putImageData(imageData, 0, 0);
+        ctx.filter = 'contrast(1.4) brightness(1.1) grayscale(1)';
+        ctx.drawImage(canvas, 0, 0);
+        
+        const imageUrl = canvas.toDataURL('image/png', 1.0);
+        const text = await extractText(imageUrl);
+        
+        if (text && text.trim()) {
+          const newText = text.trim();
+          
+          // Always append new text and update frame count
+          setCurrentText(prev => {
+            // Split both previous and new text into lines
+            const prevLines = prev.split('\n');
+            const newLines = newText.split('\n');
+            
+            // Check if we have any new lines
+            const hasNewContent = newLines.some(newLine => 
+              !prevLines.some(prevLine => prevLine.trim() === newLine.trim())
+            );
+            
+            if (hasNewContent) {
+              console.log('✅ New content detected:', {
+                newText,
+                prevLineCount: prevLines.length,
+                newLineCount: newLines.length,
+                framesCount: capturedFrames.current.length + 1
+              });
+              
+              // Add the frame and update lastImageData
+              capturedFrames.current.push(imageData);
+              lastImageDataRef.current = imageData;
+              
+              // Append new text
+              return `${prev}${prev ? '\n' : ''}${newText}`;
+            }
+            
+            console.log('ℹ️ No new content in frame');
+            return prev;
+          });
+        }
+
+        return true;
+      } finally {
+        setIsProcessing(false);
+      }
+    } finally {
+      console.groupEnd();
+    }
+  };
+
+  // Update the startFrameCapture function
+  const startFrameCapture = () => {
+    let lastCaptureTime = 0;
+    const captureInterval = 1000;
+    
+    const captureFrame = async (timestamp: number) => {
+      if (!isCapturingRef.current) {
+        console.log('Capture stopped');
+        return;
+      }
+
+      // Check if enough time has passed since last capture
+      if (timestamp - lastCaptureTime >= captureInterval) {
+        try {
+          console.log('\n=== Capturing New Frame ===');
+          console.log('Timestamp:', timestamp);
+          
+          const video = videoRef.current;
+          const canvas = canvasRef.current;
+          
+          if (!video || !canvas) {
+            console.log('Video or canvas not ready');
+            requestAnimationFrame(captureFrame);
+            return;
+          }
+
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (!ctx) {
+            console.log('Canvas context not available');
+            requestAnimationFrame(captureFrame);
+            return;
+          }
+
+          // Update canvas dimensions
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+
+          // Draw and get image data
+          ctx.drawImage(video, 0, 0);
+          const imageData = ctx.getImageData(
+            captureRegion.x,
+            captureRegion.y,
+            captureRegion.width,
+            captureRegion.height
+          );
+
+          // Process frame
+          await processFrame(imageData);
+          lastCaptureTime = timestamp;
+        } catch (error) {
+          console.error('Error capturing frame:', error);
+        }
+      }
+
+      requestAnimationFrame(captureFrame);
+    };
+
+    requestAnimationFrame(captureFrame);
+  };
+
+  const generateMeetingSummary = async () => {
+    try {
+      setIsProcessing(true);
+      const openai = new OpenAI({
+        apiKey: import.meta.env.VITE_OPENAI_API_KEY,
+        dangerouslyAllowBrowser: true
+      });
+
+      const response = await openai.chat.completions.create({
+        model: "gpt-4",
+        messages: [
+          {
+            role: "user",
+            content: `Please analyze this meeting transcript and provide:
+            1. Meeting Minutes (key points discussed)
+            2. Key Insights
+            3. Glossary of important terms
+            4. Action Items/Tasks
+            5. Next Session Details/Follow-ups
+            
+            Transcript:
+            ${currentText}`
+          }
+        ],
+        max_tokens: 1000,
+      });
+
+      const content = response.choices[0]?.message?.content;
+      if (content) {
+        const sections = content.split(/(?=\d\.\s)/);
+        setMeetingSummary({
+          minutes: sections[1]?.trim() || '',
+          insights: sections[2]?.trim() || '',
+          glossary: sections[3]?.trim() || '',
+          tasks: sections[4]?.trim() || '',
+          nextSession: sections[5]?.trim() || ''
+        });
+      }
+    } catch (error) {
+      console.error('Error generating meeting summary:', error);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const stopCapture = useCallback(async () => {
+    console.log('Stopping capture...');
+    isCapturingRef.current = false;
+    setIsCapturing(false);
+    
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      setStream(null);
+    }
+    
+    if (currentText) {
+      await generateMeetingSummary();
+    }
+  }, [stream, currentText]);
+
+  // Initialize Tesseract worker
+  useEffect(() => {
+    const initWorker = async () => {
+      setIsInitializing(true);
+      setInitError(null);
+      console.log('Initializing Tesseract worker...');
+      try {
+        const workerOptions = {
+          logger: (m: LoggerMessage) => {
+            console.log('Tesseract:', m);
+          }
+        };
+
+        const tesseractWorker = await createWorker(workerOptions);
+        await tesseractWorker.loadLanguage('eng');
+        await tesseractWorker.initialize('eng');
+        
+        setWorker(tesseractWorker);
+        setIsOcrReady(true);
+      } catch (error) {
+        console.error('Error initializing Tesseract worker:', error);
+        setInitError(error instanceof Error ? error.message : 'Failed to initialize OCR engine');
+      } finally {
+        setIsInitializing(false);
+      }
+    };
+
+    initWorker();
+
+    return () => {
+      const cleanup = async () => {
+        if (worker) {
+          await worker.terminate();
+        }
+      };
+      cleanup();
+    };
+  }, []);
+
+  return (
+    <div className="min-h-screen bg-gray-100 p-8">
+      <div className="max-w-4xl mx-auto">
+        {isInitializing ? (
+          <div className="bg-white rounded-lg shadow-lg p-6 flex items-center justify-center">
+            <Loader2 className="w-6 h-6 mr-2 animate-spin" />
+            <span>Initializing Tesseract OCR engine...</span>
+          </div>
+        ) : (
+          <>
+            <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+              <h1 className="text-2xl font-bold mb-4 text-gray-800">Screen Capture Tool</h1>
+              
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">
+                    X Position
+                    <input
+                      type="number"
+                      value={captureRegion.x}
+                      onChange={(e) => handleNumberInput(e, 'x')}
+                      min="0"
+                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                    />
+                  </label>
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Y Position
+                    <input
+                      type="number"
+                      value={captureRegion.y}
+                      onChange={(e) => handleNumberInput(e, 'y')}
+                      min="0"
+                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                    />
+                  </label>
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Width
+                    <input
+                      type="number"
+                      value={captureRegion.width}
+                      onChange={(e) => handleNumberInput(e, 'width')}
+                      min="1"
+                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                    />
+                  </label>
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">
+                    Height
+                    <input
+                      type="number"
+                      value={captureRegion.height}
+                      onChange={(e) => handleNumberInput(e, 'height')}
+                      min="1"
+                      className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="flex justify-center space-x-4">
+                <button
+                  onClick={startCapture}
+                  disabled={isCapturing}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
+                >
+                  <Camera className="w-5 h-5 mr-2" />
+                  Start Capture
+                </button>
+                <button
+                  onClick={stopCapture}
+                  disabled={!isCapturing}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:opacity-50"
+                >
+                  <StopCircle className="w-5 h-5 mr-2" />
+                  Stop Capture
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-lg shadow-lg p-6">
+              <h2 className="text-xl font-semibold mb-4 text-gray-800">Preview</h2>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="relative w-full aspect-video bg-gray-900 rounded-lg overflow-hidden">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    onLoadedMetadata={() => {
+                      console.log('Video metadata loaded');
+                      if (videoRef.current) {
+                        videoRef.current.play().catch(err => 
+                          console.error('Error playing video:', err)
+                        );
+                      }
+                    }}
+                    className="w-full h-full object-contain"
+                  />
+                  <canvas
+                    ref={canvasRef}
+                    className="absolute top-0 left-0 w-full h-full"
+                  />
+                </div>
+
+                <div className="relative w-full aspect-video bg-gray-900 rounded-lg overflow-hidden">
+                  <canvas
+                    ref={previewCanvasRef}
+                    className="w-full h-full object-contain"
+                  />
+                  {isProcessing && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
+                      <Loader2 className="w-8 h-8 animate-spin text-white" />
+                    </div>
+                  )}
+                </div>
+              </div>
+              
+              {currentText && (
+                <div className="mt-6">
+                  <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-lg font-semibold text-gray-800">Live OCR Text</h3>
+                    <button
+                      onClick={() => setCurrentText('')}
+                      className="text-gray-500 hover:text-gray-700"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <div className="bg-gray-50 p-4 rounded-lg max-h-48 overflow-y-auto">
+                    <pre className="whitespace-pre-wrap font-mono text-sm text-gray-800">
+                      {currentText}
+                    </pre>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {meetingSummary && (
+              <div className="mt-6 bg-white rounded-lg shadow-lg p-6">
+                <h2 className="text-2xl font-bold mb-6 text-gray-800">Meeting Summary</h2>
+                
+                <div className="space-y-6">
+                  <div className="border-l-4 border-blue-500 pl-4">
+                    <div className="flex items-center mb-2">
+                      <Clock className="w-5 h-5 mr-2 text-blue-500" />
+                      <h3 className="text-lg font-semibold text-gray-800">Meeting Minutes</h3>
+                    </div>
+                    <p className="text-gray-600 whitespace-pre-wrap">{meetingSummary.minutes}</p>
+                  </div>
+
+                  <div className="border-l-4 border-yellow-500 pl-4">
+                    <div className="flex items-center mb-2">
+                      <Lightbulb className="w-5 h-5 mr-2 text-yellow-500" />
+                      <h3 className="text-lg font-semibold text-gray-800">Key Insights</h3>
+                    </div>
+                    <p className="text-gray-600 whitespace-pre-wrap">{meetingSummary.insights}</p>
+                  </div>
+
+                  <div className="border-l-4 border-purple-500 pl-4">
+                    <div className="flex items-center mb-2">
+                      <Book className="w-5 h-5 mr-2 text-purple-500" />
+                      <h3 className="text-lg font-semibold text-gray-800">Glossary</h3>
+                    </div>
+                    <p className="text-gray-600 whitespace-pre-wrap">{meetingSummary.glossary}</p>
+                  </div>
+
+                  <div className="border-l-4 border-green-500 pl-4">
+                    <div className="flex items-center mb-2">
+                      <ListTodo className="w-5 h-5 mr-2 text-green-500" />
+                      <h3 className="text-lg font-semibold text-gray-800">Action Items</h3>
+                    </div>
+                    <p className="text-gray-600 whitespace-pre-wrap">{meetingSummary.tasks}</p>
+                  </div>
+
+                  <div className="border-l-4 border-red-500 pl-4">
+                    <div className="flex items-center mb-2">
+                      <Calendar className="w-5 h-5 mr-2 text-red-500" />
+                      <h3 className="text-lg font-semibold text-gray-800">Next Session</h3>
+                    </div>
+                    <p className="text-gray-600 whitespace-pre-wrap">{meetingSummary.nextSession}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {import.meta.env.DEV && (
+              <div className="mt-6 bg-gray-800 text-white rounded-lg shadow-lg p-6">
+                <h2 className="text-xl font-semibold mb-4">Debug Info</h2>
+                <div className="space-y-2">
+                  <p>OCR Ready: {isOcrReady ? '✅' : '❌'}</p>
+                  <p>Worker Initialized: {worker ? '✅' : '❌'}</p>
+                  <p>Is Capturing: {isCapturing ? '✅' : '❌'}</p>
+                  <p>Is Processing: {isProcessing ? '✅' : '❌'}</p>
+                  <p>Captured Frames: {capturedFrames.current.length}</p>
+                  <p>Current Text Length: {currentText.length}</p>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default App;
