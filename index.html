@@ -245,8 +245,9 @@
   <div><b>7.</b> Core modules</div>
   <div><b>8.</b> Writing a view, end to end</div>
   <div><b>9.</b> Host integration (3 ways)</div>
-  <div><b>10.</b> Nine things that burned us</div>
-  <div><b>11.</b> Build order for a rebuild</div>
+  <div><b>10.</b> The shapes: geometry and look</div>
+  <div><b>11.</b> Nine things that burned us</div>
+  <div><b>12.</b> Build order for a rebuild</div>
 </div>
 
 <h2>1. The short answer</h2>
@@ -282,7 +283,7 @@ mermaid, react, react-dom, react-markdown, react-router-dom, remark-gfm</code></
   </tbody>
 </table>
 
-<p>There is a <em>bridge</em> between them, and it is the most fragile seam in the system: Phase 10 parses the Phase 2 mermaid back out into graph edges and trust boundaries. Section 10 covers why that hurt.</p>
+<p>There is a <em>bridge</em> between them, and it is the most fragile seam in the system: Phase 10 parses the Phase 2 mermaid back out into graph edges and trust boundaries. Section 11 covers why that hurt.</p>
 
 <h2>3. System A — Mermaid (LLM-authored)</h2>
 
@@ -734,7 +735,213 @@ function svgEl&lt;K extends keyof SVGElementTagNameMap&gt;(
 handle.update(newGraph);
 handle.destroy();</code></pre>
 
-<h2 class="page-break">10. Nine things that burned us</h2>
+<h2 class="page-break">10. The shapes: geometry and look</h2>
+
+<p>Section 8 gives the lifecycle but calls <code>computeLayout()</code> without defining it. This section is the missing half — the actual geometry that produces the interactive shapes, and the visual treatment that makes them look like something rather than boxes.</p>
+
+<h3>10.1 The node card — four elements, one severity colour</h3>
+
+<p>Every node in every view is the same construction: a rounded card, a severity rail down its left edge, a monospace id, and a wrapped label. The rail is the trick — it reads as a status stripe at any size, and it survives being scaled down to 40% when a diagram is fitted.</p>
+
+<pre><code>const grp = svgEl("g", {
+  class: "sk-node tc-no-pan",             // tc-no-pan: click selects, not pans
+  tabindex: 0, role: "button",
+  "aria-label": `${n.id} ${n.label}, severity ${n.severity}, boundary ${boundaryLabel}`,
+});
+
+// 1. the card — fill is a token, stroke carries severity
+grp.appendChild(svgEl("rect", {
+  x: g.x, y: g.y, width: g.w, height: g.h, rx: 8,
+  fill: "var(--tc-card-fill)",             // rgba(255,255,255,.04) — a film, not a colour
+  stroke: severityVar(n.severity), "stroke-width": 1.4,
+}));
+
+// 2. the severity rail — 4px, same colour, solid
+grp.appendChild(svgEl("rect", {
+  x: g.x, y: g.y, width: 4, height: g.h, rx: 2, fill: severityVar(n.severity),
+}));
+
+// 3. the id, monospace and recessive
+const idt = svgEl("text", { x: g.x + 11, y: g.y + 15, class: "sk-nodeid" });
+idt.textContent = n.id;                    // textContent — never innerHTML here
+
+// 4. the label, wrapped to two lines, second line only if the box is tall enough
+const [l1, l2] = wrapTwoLines(n.label, 20);
+const t1 = svgEl("text", { x: g.x + 11, y: g.y + (g.h &lt; 40 ? g.h / 2 + 9 : 30), class: "sk-nodelabel" });
+t1.textContent = l1;
+if (l2 &amp;&amp; g.h &gt;= 40) { /* second line at y + 43 */ }</code></pre>
+
+<p>Note the vertical centring conditional: below 40px the label centres in the box; above it, it sits at a fixed offset with room for a second line. SVG has no text layout, so wrapping and vertical rhythm are both manual.</p>
+
+<div class="callout callout--key">
+  <span class="tag">Why fill is a film, not a colour</span>
+  <p><code>--tc-card-fill</code> is <code>rgba(255,255,255,0.04)</code> — it lightens whatever is behind it rather than painting over it. That is the whole "glass" effect: cards stack on the dark ground and on each other without any of them needing to know the background. It also means one token works in both themes.</p>
+</div>
+
+<h3>10.2 Layering — tiers from the graph, not from a table</h3>
+
+<p>Attack path assigns a tier per node with a Kahn-style longest-path walk. Every node starts at tier 0; each edge pushes its target to at least one past its source. Cycles cannot hang it because a node is only enqueued when its indegree drains.</p>
+
+<pre><code>function computeTiers(ids: Set&lt;string&gt;, hopEdges: HopEdge[]): Map&lt;string, number&gt; {
+  const adj = new Map&lt;string, string[]&gt;(), indeg = new Map&lt;string, number&gt;();
+  ids.forEach((id) =&gt; { adj.set(id, []); indeg.set(id, 0); });
+  hopEdges.forEach(({ from, to }) =&gt; {
+    if (!adj.has(from) || !adj.has(to)) return;      // ignore edges to unknown nodes
+    adj.get(from)!.push(to);
+    indeg.set(to, (indeg.get(to) ?? 0) + 1);
+  });
+
+  const tier = new Map&lt;string, number&gt;();
+  ids.forEach((id) =&gt; tier.set(id, 0));
+
+  const queue = [...ids].filter((id) =&gt; (indeg.get(id) ?? 0) === 0);   // the entry points
+  const visited = new Set&lt;string&gt;();
+  while (queue.length) {
+    const id = queue.shift()!;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    (adj.get(id) ?? []).forEach((next) =&gt; {
+      tier.set(next, Math.max(tier.get(next) ?? 0, (tier.get(id) ?? 0) + 1));   // longest path
+      const remaining = (indeg.get(next) ?? 0) - 1;
+      indeg.set(next, remaining);
+      if (remaining &lt;= 0 &amp;&amp; !visited.has(next)) queue.push(next);
+    });
+  }
+  return tier;
+}</code></pre>
+
+<p><code>Math.max</code> rather than assignment is what makes it <em>longest</em> path — a node sits one past its deepest predecessor, so an edge never points backwards.</p>
+
+<p>The sankey does the same, then adds <strong>barycentre ordering</strong> to stop ribbons crossing: four sweeps, alternating direction, each placing a node at the mean position of its neighbours in the adjacent column.</p>
+
+<pre><code>for (let sweep = 0; sweep &lt; 4; sweep++) {
+  const left = sweep % 2 === 0;              // alternate which side we average against
+  for (let c = 0; c &lt; cols.length; c++) {
+    const bary: Record&lt;string, number&gt; = {};
+    cols[c].forEach((n) =&gt; {
+      let sum = 0, ct = 0;
+      flows.forEach((f) =&gt; {
+        if (left ? (f.e.to === n.id &amp;&amp; layer[f.e.from] &lt; c)
+                 : (f.e.from === n.id &amp;&amp; layer[f.e.to] &gt; c)) { sum += pos[f.e.from ?? f.e.to]; ct++; }
+      });
+      bary[n.id] = ct ? sum / ct : pos[n.id];   // no neighbours → hold position
+    });
+    cols[c].sort((a, b) =&gt; bary[a.id] - bary[b.id]);
+    cols[c].forEach((n, i) =&gt; (pos[n.id] = i));
+  }
+}</code></pre>
+
+<h3>10.3 Ribbons — a filled Bézier, not a stroked line</h3>
+
+<p>A sankey ribbon is one closed path: out along the top edge, down the far side, back along the bottom edge, close. Control points sit at the horizontal midpoint on both sides, which gives the S-curve its symmetry.</p>
+
+<pre><code>function ribbonPath(f: FlowRec): string {
+  const gS = geo[f.e.from], gT = geo[f.e.to];
+  const x0 = gS.x + gS.w, x1 = gT.x;                    // leave the source, enter the target
+  const sy0 = f.sy0, sy1 = f.sy0 + f.sh;                // slot on the source side
+  const ty0 = f.ty0, ty1 = f.ty0 + f.th;                // slot on the target side
+
+  if (x1 &gt; x0) {
+    const cx = x0 + (x1 - x0) * 0.5;                    // both control points at the midpoint
+    return `M${x0},${sy0} C${cx},${sy0} ${cx},${ty0} ${x1},${ty0} `
+         + `L${x1},${ty1} C${cx},${ty1} ${cx},${sy1} ${x0},${sy1} Z`;
+  }
+  // Backwards edge: bow outward and lift, so it reads as a return path
+  // instead of collapsing into a flat line behind the nodes.
+  const bow = 70, cx0 = x0 + bow, cx1 = x1 - bow;
+  return `M${x0},${sy0} C${cx0},${sy0 - 10} ${cx1},${ty0 - 10} ${x1},${ty0} `
+       + `L${x1},${ty1} C${cx1},${ty1 + 10} ${cx0},${sy1 + 10} ${x0},${sy1} Z`;
+}</code></pre>
+
+<p><strong>Slot assignment</strong> is what stops ribbons overlapping where they meet a node. Each node's inbound and outbound flows are sorted by the vertical centre of their <em>other</em> end — so ribbons arrive in the same order they leave — then stacked down the node's edge, scaled to fit if they overflow:</p>
+
+<pre><code>const ycenter = (id: string) =&gt; geo[id].y + geo[id].h / 2;
+laidOut.forEach((n) =&gt; {
+  outFlows[n.id].sort((a, b) =&gt; ycenter(a.e.to)   - ycenter(b.e.to));
+  inFlows[n.id] .sort((a, b) =&gt; ycenter(a.e.from) - ycenter(b.e.from));
+});
+laidOut.forEach((n) =&gt; {
+  const g = geo[n.id];
+  const totOut = outFlows[n.id].reduce((s, f) =&gt; s + f.w, 0);
+  const scaleOut = totOut &gt; g.h ? g.h / totOut : 1;     // never exceed the node's height
+  let oy = g.y + (g.h - totOut * scaleOut) / 2;         // centre the stack on the node
+  outFlows[n.id].forEach((f) =&gt; { f.sy0 = oy; f.sh = f.w * scaleOut; oy += f.sh; });
+  /* same again for inFlows → f.ty0 / f.th */
+});</code></pre>
+
+<h3>10.4 Radial placement — crown jewel</h3>
+
+<p>Crown jewel puts datastores at the centre and rings everything else by <em>attack distance</em> (BFS hop count from any threat actor). Two details make it readable:</p>
+
+<ul>
+  <li><strong>Ring by hops, angle by affinity.</strong> A node's radius is its hop count; its angle is the circular mean of the angles of the jewels it can reach, so nodes drift toward what they threaten rather than scattering.</li>
+  <li><strong>Circular mean, not arithmetic.</strong> Averaging angles naively breaks at the 0/2π seam. Sum the unit vectors and take <code>atan2</code>:</li>
+</ul>
+
+<pre><code>function meanAngle(angs: number[]): number {
+  let s = 0, c = 0;
+  angs.forEach((a) =&gt; { s += Math.sin(a); c += Math.cos(a); });
+  return Math.atan2(s, c);
+}
+// position on the ring
+pos[id] = { x: cx + R * Math.cos(angle), y: cy + R * Math.sin(angle) };</code></pre>
+
+<p>Hop distance is computed over the <strong>full</strong> graph even when the relevance filter hides most nodes — otherwise hiding a node would silently shorten the path through it and misreport how close an attacker is.</p>
+
+<h3>10.5 Selection — dim everything else</h3>
+
+<p>Nothing highlights. Selecting adds a class to the container and everything unrelated gets a <code>-dim</code> class, so the selection emerges by subtraction. The numbers matter: ribbons drop far further than nodes, because a faint ribbon still reads as a line while a faint box disappears.</p>
+
+<pre><code>.sk-ribbon.sk-dim { opacity: 0.05 !important; }   /* ribbons: almost gone */
+.sk-node.sk-dim   { opacity: 0.18; }              /* nodes: still locatable */
+.cj-arc.cj-dim    { opacity: 0.045; }
+.cj-node.cj-dim   { opacity: 0.22; }
+
+/* Emphasis is weight, not colour — the severity hue is already spoken for. */
+.cj-node .cj-body      { transition: stroke-width 0.15s; }
+.cj-node.cj-hot .cj-body { stroke-width: 2.4; }   /* hover */
+.cj-node.cj-sel .cj-body { stroke-width: 3; }     /* selected */</code></pre>
+
+<div class="callout">
+  <span class="tag">Why emphasis is never colour</span>
+  <p>Stroke colour already encodes severity. If selection also changed colour, a selected low-severity node would read as high. Selection changes <em>stroke width</em>; relevance changes <em>opacity</em>; severity owns hue. One channel, one meaning — that rule is what keeps the views legible when three states apply at once.</p>
+</div>
+
+<h3>10.6 Tooltips — absolute, pointer-events none</h3>
+
+<pre><code>.sk-tip {
+  position: absolute;             /* inside the stage, which is position:relative */
+  pointer-events: none;           /* never eats the hover that spawned it */
+  z-index: 20;
+  max-width: 290px;
+  background: var(--tc-raised);
+  border: 1px solid var(--tc-card-border);
+  border-radius: 10px;
+  box-shadow: 0 12px 34px rgb(var(--tc-shadow-rgb) / 0.55);
+  opacity: 0; transform: translateY(4px);
+}
+.sk-tip.show { opacity: 1; transform: none; }</code></pre>
+
+<p>Clamp it to the stage on both axes before showing, or it clips at the edges:</p>
+
+<pre><code>if (x + tipW &gt; r.width  - 6) x = r.width  - tipW - 6;
+if (y + tipH &gt; r.height - 6) y = r.height - tipH - 6;</code></pre>
+
+<h3>10.7 The pieces that make it feel designed</h3>
+<table>
+  <thead><tr><th style="width:30%">Detail</th><th>Value, and why</th></tr></thead>
+  <tbody>
+    <tr><td>Card radius</td><td><code>rx: 8</code> on nodes, <code>10px</code> on tooltips — one radius per element class, never mixed</td></tr>
+    <tr><td>Severity rail</td><td>4px wide, <code>rx: 2</code> — readable at 40% scale where a 1.4px stroke is not</td></tr>
+    <tr><td>Card stroke</td><td>1.4px, not 1 — survives fractional scaling without shimmering</td></tr>
+    <tr><td>Ring guides</td><td><code>--tc-hair</code> (4% white), 1px — structure that recedes</td></tr>
+    <tr><td>Transitions</td><td>0.12–0.18s on opacity and stroke-width only; never on layout</td></tr>
+    <tr><td>Ids</td><td>Always <code>--tc-mono</code> at ~9.5px in <code>--tc-text-2</code> — an id is metadata, not content</td></tr>
+    <tr><td>Labels</td><td><code>pointer-events: none</code> so text never intercepts a click meant for the card</td></tr>
+  </tbody>
+</table>
+
+<h2 class="page-break">11. Nine things that burned us</h2>
 
 <p>The most valuable section. Each of these shipped, looked fine, and was wrong.</p>
 
@@ -769,7 +976,7 @@ handle.destroy();</code></pre>
 <h3>9 — Empty states that lie</h3>
 <p>A findings tab read a variable only populated while a <em>different</em> tab was open, so a completed run rendered "No findings yet (Phase 7 not complete)". Distinguish <em>not run yet</em> from <em>ran and produced nothing</em> from <em>ran but could not be parsed</em>. They are three different bugs and one message hides all three.</p>
 
-<h2>11. Build order for a rebuild</h2>
+<h2>12. Build order for a rebuild</h2>
 
 <ol>
   <li><strong>Schema first.</strong> Write the JSON schema and the TS mirror before any view. Everything negotiates through it.</li>
