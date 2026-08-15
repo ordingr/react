@@ -1,0 +1,790 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+
+<title>Rostam Threat Explorer — implementation handoff</title>
+<style>
+  /* Palette as tokens so both themes are a token swap, never a per-rule
+     override. Neutrals carry a slight blue bias toward the accent rather
+     than sitting at pure grey. */
+  :root {
+    --ink:     #14161c;
+    --ink-2:   #4a4f5c;
+    --ink-3:   #7b8293;
+    --page:    #f7f8fa;
+    --surface: #ffffff;
+    --well:    #eef1f6;
+    --rule:    #dde1e9;
+    --code-bg: #f2f4f8;
+    --accent:  #1d5fa8;
+    --warn:    #a8481f;
+    --shadow:  0 1px 2px rgba(20, 22, 28, .05), 0 8px 24px rgba(20, 22, 28, .05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink:     #e6e9f2;
+      --ink-2:   #a8afc0;
+      --ink-3:   #757d90;
+      --page:    #0e1014;
+      --surface: #16191f;
+      --well:    #1b1f27;
+      --rule:    #2a2f3a;
+      --code-bg: #11141a;
+      --accent:  #6aa6e8;
+      --warn:    #e0906a;
+      --shadow:  0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .3);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink:     #e6e9f2;  --ink-2:   #a8afc0;  --ink-3:   #757d90;
+    --page:    #0e1014;  --surface: #16191f;  --well:    #1b1f27;
+    --rule:    #2a2f3a;  --code-bg: #11141a;
+    --accent:  #6aa6e8;  --warn:    #e0906a;
+    --shadow:  0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .3);
+  }
+  :root[data-theme="light"] {
+    --ink:     #14161c;  --ink-2:   #4a4f5c;  --ink-3:   #7b8293;
+    --page:    #f7f8fa;  --surface: #ffffff;  --well:    #eef1f6;
+    --rule:    #dde1e9;  --code-bg: #f2f4f8;
+    --accent:  #1d5fa8;  --warn:    #a8481f;
+    --shadow:  0 1px 2px rgba(20, 22, 28, .05), 0 8px 24px rgba(20, 22, 28, .05);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 0 20px 96px;
+    background: var(--page);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 16px;
+    line-height: 1.62;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  /* One column, measured for reading. Code and tables get to break out.
+     The measure is an absolute length, not a ch unit: ch scales with
+     font-size, so a 44px h1 and 16px body text resolve the same 74ch to
+     wildly different widths and their left edges stop lining up. */
+  :root { --col: 46rem; --col-wide: 58rem; }
+
+  h1, .lede, .meta, p, ul, ol, h2, h3, h4, .callout, .toc, figcaption {
+    max-width: var(--col);
+    margin-left: auto;
+    margin-right: auto;
+  }
+  pre, table { max-width: var(--col-wide); margin-left: auto; margin-right: auto; }
+
+  h1 {
+    font-size: clamp(30px, 5vw, 44px);
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    margin: 56px auto 10px;
+    text-wrap: balance;
+  }
+  .lede {
+    font-size: clamp(17px, 2.4vw, 20px);
+    line-height: 1.45;
+    color: var(--ink-2);
+    margin-bottom: 10px;
+    text-wrap: balance;
+  }
+  .meta {
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    color: var(--ink-3);
+    line-height: 1.6;
+  }
+  hr.title-rule {
+    border: 0;
+    border-top: 2px solid var(--ink);
+    max-width: var(--col-wide);
+    margin: 22px auto 30px;
+  }
+  h2 { max-width: var(--col-wide); }
+
+  h2 {
+    font-size: clamp(20px, 3vw, 25px);
+    letter-spacing: -0.015em;
+    margin: 56px auto 14px;
+    padding-top: 16px;
+    border-top: 2px solid var(--ink);
+    text-wrap: balance;
+  }
+  h3 { font-size: 17px; margin: 30px auto 7px; text-wrap: balance; }
+  h4 {
+    font-size: 12.5px; margin: 22px auto 6px; color: var(--ink-2);
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+
+  p  { margin: 0 auto 13px; }
+  ul, ol { margin: 0 auto 14px; padding-left: 22px; max-width: calc(var(--col) - 22px); }
+  li { margin-bottom: 6px; }
+  strong { font-weight: 650; }
+
+  a { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+  code {
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 0.875em;
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    padding: 0.5px 5px;
+    border-radius: 4px;
+    word-break: break-word;
+  }
+
+  pre {
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    border-radius: 7px;
+    padding: 15px 18px;
+    margin: 0 auto 18px;
+    overflow-x: auto;          /* wide code scrolls itself, page never does */
+    white-space: pre;
+    tab-size: 2;
+  }
+  pre code { background: none; border: 0; padding: 0; font-size: 1em; }
+
+  /* Tables scroll in their own container on narrow screens. */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 auto 20px;
+    font-size: 14.5px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 7px;
+    overflow: hidden;
+  }
+  th, td { text-align: left; padding: 9px 13px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  th {
+    font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--ink-3); background: var(--well); font-weight: 600;
+  }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 9px;
+    padding: 18px 22px;
+    margin-bottom: 8px;
+    font-size: 15px;
+    column-count: 2;
+    column-gap: 28px;
+    box-shadow: var(--shadow);
+  }
+  .toc div { margin-bottom: 5px; break-inside: avoid; color: var(--ink-2); }
+  .toc b { color: var(--ink); }
+
+  .callout {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--warn);
+    border-radius: 7px;
+    padding: 15px 19px;
+    margin: 0 auto 18px;
+    box-shadow: var(--shadow);
+  }
+  .callout--key { border-left-color: var(--accent); }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .tag {
+    display: block; font-size: 11.5px; text-transform: uppercase;
+    letter-spacing: 0.09em; color: var(--warn); font-weight: 650; margin-bottom: 6px;
+  }
+  .callout--key .tag { color: var(--accent); }
+
+  figcaption { font-size: 13px; color: var(--ink-3); margin: -8px auto 18px; }
+
+  /* Screen has no pages; the print rules stay so this still prints cleanly. */
+  .page-break { break-before: page; }
+  .keep { break-inside: avoid; }
+
+  @media (max-width: 640px) {
+    body { padding: 0 14px 64px; font-size: 15.5px; }
+    .toc { column-count: 1; }
+    pre { font-size: 12px; padding: 12px 13px; }
+  }
+
+  @media print {
+    body { background: #fff; color: #14161c; padding: 0; font-size: 10.2pt; }
+    @page { size: A4; margin: 16mm 14mm; }
+    h1, h2, h3, h4, p, ul, ol, pre, table, .callout, .toc, .meta, .lede, hr.title-rule {
+      max-width: none;
+    }
+    h1 { margin-top: 0; }
+    h2 { margin-top: 26px; break-after: avoid; }
+    pre, table, .callout { break-inside: avoid; box-shadow: none; }
+    pre { white-space: pre-wrap; word-break: break-word; font-size: 7.9pt; }
+  }
+</style>
+</head>
+<body>
+<h1>Rostam Threat Explorer</h1>
+<p class="lede">Implementation handoff — how the diagrams are built, what the data contract is, and the prompts that produce it.</p>
+<p class="meta">Source of record: <code>C:\Users\arash\Rostam</code> @ 7f4de02 &middot; written 2026-08-12 &middot; audience: an engineer or agent rebuilding this</p>
+<hr class="title-rule">
+
+<div class="toc">
+  <div><b>1.</b> The short answer</div>
+  <div><b>2.</b> Two independent diagram systems</div>
+  <div><b>3.</b> System A — Mermaid (LLM-authored)</div>
+  <div><b>4.</b> The Phase 2 prompts, verbatim</div>
+  <div><b>5.</b> System B — threat-canvas</div>
+  <div><b>6.</b> The data contract (threat-graph v1)</div>
+  <div><b>7.</b> Core modules</div>
+  <div><b>8.</b> Writing a view, end to end</div>
+  <div><b>9.</b> Host integration (3 ways)</div>
+  <div><b>10.</b> Nine things that burned us</div>
+  <div><b>11.</b> Build order for a rebuild</div>
+</div>
+
+<h2>1. The short answer</h2>
+
+<p>One runtime diagram dependency: <code>mermaid ^10.9.0</code>. That is the whole list.</p>
+
+<p>Everything else — all ten explorer views, the architecture diagram, sankey ribbons, radial layouts, heatmaps, timelines — is <strong>hand-authored SVG and DOM</strong> built with <code>document.createElementNS</code> and template strings. No D3, no dagre, no ELK, no cytoscape, no charting library.</p>
+
+<pre><code>// frontend/package.json — dependencies, complete
+@copilotkit/react-core, @copilotkit/react-ui, @tanstack/react-query,
+mermaid, react, react-dom, react-markdown, react-router-dom, remark-gfm</code></pre>
+
+<div class="callout callout--key">
+  <span class="tag">Why this matters for a rebuild</span>
+  <p>The zero-dependency choice is load-bearing, not incidental. The view package is consumed three ways from one compiled source — inside the React SPA, as a run-less import viewer, and as a bare <code>&lt;script&gt;</code> embed with no build step. A layout library in the graph path would break the third.</p>
+</div>
+
+<h2>2. Two independent diagram systems</h2>
+
+<p>They share no code and solve different problems. Conflating them is the first mistake to avoid.</p>
+
+<table>
+  <thead>
+    <tr><th style="width:16%"></th><th style="width:42%">System A — Mermaid</th><th style="width:42%">System B — threat-canvas</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><strong>Authored by</strong></td><td>The LLM, as text, during Phase 2</td><td>Code, from structured data</td></tr>
+    <tr><td><strong>Input</strong></td><td>Markdown with <code>```mermaid</code> fences</td><td><code>threat-graph v1</code> JSON</td></tr>
+    <tr><td><strong>Determinism</strong></td><td>None — regenerating changes it</td><td>Total — same JSON, same pixels</td></tr>
+    <tr><td><strong>Failure mode</strong></td><td>Syntax error → red error SVG</td><td>Missing data → honest empty state</td></tr>
+    <tr><td><strong>Used for</strong></td><td>Data-flow + sequence diagrams in the phase report</td><td>The ten interactive explorer views</td></tr>
+    <tr><td><strong>Count</strong></td><td>1 flowchart + ≤3 sequence diagrams</td><td>10 registered views</td></tr>
+  </tbody>
+</table>
+
+<p>There is a <em>bridge</em> between them, and it is the most fragile seam in the system: Phase 10 parses the Phase 2 mermaid back out into graph edges and trust boundaries. Section 10 covers why that hurt.</p>
+
+<h2>3. System A — Mermaid (LLM-authored)</h2>
+
+<p>Mermaid bakes colors into the SVG string at render time, so it cannot ride on CSS custom properties like the rest of the app. It needs its own palette per theme and a full re-render when the theme changes.</p>
+
+<pre><code>// frontend/src/lib/mermaid.ts — the shape that matters
+export function initMermaid(theme: Theme = getTheme()) {
+  if (initializedFor === theme) return;
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: theme === "dark" ? "dark" : "base",
+    themeVariables: THEME_VARIABLES[theme],   // full palette, per theme
+    securityLevel: "loose",
+    flowchart: { useMaxWidth: false, htmlLabels: true },
+  });
+  initializedFor = theme;
+}
+
+export async function renderMermaid(id, source, theme = getTheme()): Promise&lt;string&gt; {
+  initMermaid(theme);
+  try {
+    const { svg } = await mermaid.render(id, source);
+    return svg;
+  } finally {
+    cleanupInjectedDom(id);   // &lt;-- see below, this is not optional
+  }
+}</code></pre>
+
+<div class="callout">
+  <span class="tag">Real bug, budget time for it</span>
+  <p>mermaid 10.9.x writes working DOM straight into <code>document.body</code> during <code>render()</code> — some diagram types do this via their own hardcoded <code>d3.select("body")</code>, bypassing any container you pass. On success it cleans up. <strong>On a parse or draw failure it does not</strong>, leaving a red "Syntax error" SVG or an orphaned measurement <code>&lt;svg&gt;</code> attached to the page outside React's control. You must remove it yourself, keyed by render id plus mermaid's own wrapper ids (<code>d{id}</code>, <code>i{id}</code>), plus any id-less <code>body &gt; svg</code>.</p>
+</div>
+
+<p><code>useMaxWidth: false</code> matters too: mermaid otherwise adds a shrink-to-fit style that fights any pan/zoom viewport you wrap it in. Read the true design size from the rendered SVG's <code>viewBox.baseVal</code> rather than trusting the element's width.</p>
+
+<h2>4. The Phase 2 prompts, verbatim</h2>
+
+<p>These are the actual constants from <code>backend/rostam/services/phases/phase_prompts.py</code>. Every rule in them exists because its absence broke something in a real run — they are a scar record, not style preferences.</p>
+
+<h3>4.1 Flowchart rules</h3>
+
+<pre><code>PHASE2_MERMAID_SYNTAX_RULES = """Mermaid syntax rules (violations break rendering):
+- Node labels go in square brackets with quotes: `S01["API Gateway"]`.
+- Edge labels use pipes and are NEVER quoted: `A --&gt;|steals token| B`. A
+  quoted edge label that runs out of room before its closing quote breaks
+  the whole diagram; an unquoted one has no closing quote to drop.
+- Use `--&gt;` for a one-way data flow and `&lt;--&gt;` for a two-way flow (e.g. a
+  request/response pair or a heartbeat/session-check exchanged in both
+  directions) — one line, one arrow, one label describing the flow, not two
+  separate `--&gt;` lines for the same exchange.
+- Every `subgraph` (used for a trust boundary) declares an id immediately
+  followed by a bracketed, quoted label: `subgraph TB1["Browser Internet"]`.
+  Never emit a `subgraph` with a label and no id — every other component of
+  this pipeline that references a trust boundary (node membership, threat
+  attribution) does so by that id, not by the label text.
+- No parentheses or unquoted special characters inside labels — for edge
+  labels that also means no `[]` or `{}`, since mermaid reads those as
+  syntax once the label isn't quoted. Commas, slashes, and hyphens are fine.
+- Every code fence you open (```) must be closed.
+- Edge labels are 6 words or fewer. Spell severity out in full (Low,
+  Medium, High) rather than abbreviate it — if the classification is too
+  long, shorten the data-type description instead of the severity word."""</code></pre>
+
+<div class="callout">
+  <span class="tag">The subgraph-id rule is the expensive one</span>
+  <p>An id-less <code>subgraph "Label"</code> renders perfectly. It is forbidden anyway, because downstream reconciliation references boundaries <em>by id</em>. Omitting it is exactly what evicted a real trust boundary from a synthesized graph. A rule can be about your pipeline, not about the renderer — say which, in the prompt's own comment, or someone will "simplify" it later.</p>
+</div>
+
+<h3>4.2 Sequence-diagram rules — deliberately different</h3>
+
+<p>Sequence-diagram syntax is <em>not</em> flowchart syntax. Message text runs unquoted to end-of-line, so the quoting and bracket rules above actively harm here. This was established by driving the real mermaid parser, not by reading docs.</p>
+
+<pre><code>PHASE2_SEQUENCE_SYNTAX_RULES = """Mermaid sequence-diagram syntax rules (violations break rendering) — these
+are NOT the same rules as the flowchart rules above:
+- Declare each participant once, reusing the exact S0X/D0X id from the
+  component inventory as the participant id: `participant S02 as Auth Service`.
+  Never introduce a participant that isn't an existing S0X/D0X id.
+- Message text follows a colon and runs unquoted to the end of the line —
+  do not wrap it in quotes: `S01-&gt;&gt;S02: submit credentials`. Parentheses,
+  brackets, braces, colons, and quote characters are all safe unquoted in
+  that text.
+- Never put a semicolon (`;`) in message text — mermaid treats it as a
+  statement separator and it breaks the parse even mid-message. Use "and"
+  or a comma instead.
+- Use `-&gt;&gt;` for a request/call and `--&gt;&gt;` for its response. Use
+  `Note over S0X,S0Y: ...` for context that isn't a message between two
+  participants. `activate`/`deactivate` are optional, for showing a
+  participant is busy handling a prior request.
+- Every code fence you open (```) must be closed.
+- Keep each diagram to the steps where order matters — 4 to 8 messages is
+  enough; omit steps that don't affect correctness or security."""</code></pre>
+
+<h3>4.3 The Phase 2 system prompt</h3>
+
+<pre><code>PHASE2_SYSTEM = f"""You are running Phase 2: Data-flow analysis.
+
+Task: Produce a Mermaid `flowchart LR` diagram showing every data flow between
+the components identified in Phase 1, labeled with the data classification
+crossing each edge. Annotate trust boundaries. Then, separately, diagram the
+ordering of the handful of flows where sequence is a security property.
+
+Output, in this order:
+
+## Data Flow
+A single mermaid block with the `flowchart LR` diagram described above.
+
+## Trust Boundaries
+A table listing each boundary and which components sit on each side.
+
+## Key Flow Sequences
+At most 3 mermaid `sequenceDiagram` blocks, one per flow. A flowchart shows
+what connects to what; it cannot show order, so reserve this section for
+flows whose correctness depends on doing steps in the right order —
+authentication, token issuance/validation, privilege or tenant-boundary
+crossings, secret retrieval, or anything else where the security property
+IS the order (validate-before-use, verify-signature-before-trust,
+check-expiry-before-accept). Do not diagram routine data pass-through with
+no ordering constraint — the Data Flow diagram already covers that, and an
+exhaustive catalogue of request paths buries the flows that actually matter.
+Prefer 1-2 tightly chosen sequences over 3 loosely chosen ones; emit zero if
+no flow in this system has order-dependent, security-relevant behavior.
+Every participant must be an S0X or D0X id already assigned in Phase 1.
+
+{PHASE2_MERMAID_SYNTAX_RULES}
+
+{PHASE2_SEQUENCE_SYNTAX_RULES}
+"""</code></pre>
+
+<p>Two design decisions worth copying: the <strong>cap</strong> (at most 3) and the <strong>selection criterion</strong> ("the security property IS the order"). Without both, the model emits a sequence diagram per request path and buries the ones that matter.</p>
+
+<h2 class="page-break">5. System B — threat-canvas</h2>
+
+<p>A framework-agnostic, dependency-free TypeScript package. Ten views, plain DOM/SVG.</p>
+
+<pre><code>frontend/src/threat-canvas/
+├── index.ts          public API + side-effect view registration
+├── registry.ts       registerView / renderThreatView / getRegisteredViews
+├── types.ts          threat-graph v1 TypeScript mirror of the JSON schema
+├── events.ts         4 outbound CustomEvents — the only host coupling
+├── escape.ts         esc() — mandatory on every graph-derived string
+├── severity.ts       severity → CSS var + rank
+├── format.ts         evidence / MITRE id formatting
+├── relevance.ts      "is this node worth showing by default"
+├── element.ts        &lt;rostam-threat-view&gt; custom element
+├── theme.css         --tc-* design tokens (light + dark)
+├── interaction/
+│   └── panZoom.ts    generic viewport/content pan + zoom controller
+├── views/            10 × (view.ts + view.css)
+├── fixtures/         canonical + adversarial graphs
+└── __tests__/        registry-driven acceptance suite</code></pre>
+
+<h3>The ten views</h3>
+<table>
+  <thead><tr><th style="width:24%">View</th><th style="width:14%">Lines</th><th>Answers</th></tr></thead>
+  <tbody>
+    <tr><td><code>threat-lens</code></td><td class="num">1042</td><td>What is the threat and where does it live?</td></tr>
+    <tr><td><code>attack-path</code></td><td class="num">946</td><td>How does an attacker get from entry to crown jewel?</td></tr>
+    <tr><td><code>sensitivity-sankey</code></td><td class="num">938</td><td>Which data flows are fattest and most sensitive?</td></tr>
+    <tr><td><code>crown-jewel</code></td><td class="num">826</td><td>How many hops is an attacker from what matters?</td></tr>
+    <tr><td><code>trust-zones</code></td><td class="num">721</td><td>What crosses which trust boundary?</td></tr>
+    <tr><td><code>triage-minimap</code></td><td class="num">658</td><td>Where on the map is this threat?</td></tr>
+    <tr><td><code>stride-heatmap</code></td><td class="num">474</td><td>Which STRIDE categories cluster where?</td></tr>
+    <tr><td><code>mitre-lanes</code></td><td class="num">448</td><td>Which ATT&amp;CK tactics are covered?</td></tr>
+    <tr><td><code>evolution-timeline</code></td><td class="num">377</td><td>How did findings change across phases?</td></tr>
+    <tr><td><code>layered-tilt</code></td><td class="num">319</td><td>How do C4 levels stack?</td></tr>
+  </tbody>
+</table>
+
+<h2>6. The data contract (threat-graph v1)</h2>
+
+<p>Everything downstream of Phase 10 speaks this. The TS types mirror <code>schema/threat-graph/threat-graph.v1.schema.json</code> 1:1.</p>
+
+<pre><code>export interface ThreatGraph {
+  schemaVersion: "1.0";
+  meta:        GraphMeta;               // { generator, appName, runId?, createdAt }
+  levels:      Record&lt;string, LevelDef&gt;;
+  nodes:       GraphNode[];
+  edges:       GraphEdge[];
+  boundaries:  Boundary[];
+  threats:     Threat[];
+  actors:      Actor[];
+  evolution?:      EvolutionEvent[];
+  reconciliation?: Reconciliation;
+}
+
+export interface GraphNode {
+  id: string;                    // "S01" service | "D01" datastore
+  label: string;
+  level: "context" | "container" | "component";
+  service: string;               // "api" | "database" | "cdn" | ...
+  severity: QualitativeSeverity;
+  threats: string[];             // threat ids touching this node
+  boundary: string;              // boundary id, or "TB-UNASSIGNED"
+  evidence: EvidenceRef;         // { file, startLine, endLine }
+  parent?: string;
+  crownJewel?: boolean;
+}
+
+export interface GraphEdge {
+  from: string; to: string; label: string;
+  sensitivity: "high" | "med" | "low";
+  crossesBoundary: boolean;
+  carriesSecret?: boolean;
+}
+
+export interface Threat {
+  id: string; fingerprint: string; title: string;
+  actor: string;                 // actor id
+  stride: string;
+  severity: QualitativeSeverity;
+  evidence: EvidenceRef;
+  path: string[];                // ordered ids: actor → … → target
+  verdict: "confirmed" | "challenged" | "suggested_remove" | "suggested";
+  mitre?: MitreEntry[]; cwe?: string[]; capec?: string[];
+  controls?: Control[];
+  likelihood?: number; impact?: number; riskScore?: number;
+}</code></pre>
+
+<div class="callout callout--key">
+  <span class="tag">The two fields everything hinges on</span>
+  <p><code>threat.path</code> is what the attack-path and sankey views trace. A graph without paths renders nodes but no routes, and looks broken rather than empty.</p>
+  <p><code>node.threats</code> drives the default relevance filter (section 7). A graph where nobody populates it will show every node at once, which on real data is unreadable.</p>
+</div>
+
+<h2>7. Core modules</h2>
+
+<h3>7.1 Registry — the whole plugin surface</h3>
+
+<pre><code>export interface ViewHandle {
+  el: HTMLElement;
+  update(graph: ThreatGraph): void;   // re-render in place
+  destroy(): void;                    // tear down listeners/timers, clear DOM
+}
+
+export type ViewFactory =
+  (el: HTMLElement, graph: ThreatGraph, options?: RenderOptions) =&gt; ViewHandle;
+
+export function registerView(name: string, factory: ViewFactory): void;
+export function getRegisteredViews(): string[];
+
+export function renderThreatView(el, view, graph, options?): ViewHandle {
+  const factory = registry.get(view);
+  if (!factory) throw new Error(
+    `threat-canvas: unknown view "${view}" (registered: ${getRegisteredViews().join(", ")})`);
+  el.innerHTML = "";
+  return factory(el, graph, options);
+}</code></pre>
+
+<p>Views self-register as an import side effect, so <code>index.ts</code> just imports them. Adding a view is one file plus one import line — no switch statement to update.</p>
+
+<h3>7.2 Events — the only coupling to a host</h3>
+
+<p>threat-canvas never imports host code. It talks outward through four DOM CustomEvents, dispatched on the mount element with <code>bubbles: true, composed: true</code>.</p>
+
+<pre><code>"threat-select"  { threatId }
+"node-select"    { nodeId }
+"evidence-open"  { file, startLine, endLine }
+"drill"          { fromLevel, toLevel, viaId }</code></pre>
+
+<h3>7.3 esc() — a hard security requirement</h3>
+
+<div class="callout">
+  <span class="tag">Non-negotiable</span>
+  <p>The package renders <strong>arbitrary untrusted JSON</strong> — pasted documents, possibly produced by another AI. Every string originating from graph data must pass through <code>esc()</code> before landing in an HTML template, in text position or inside a double-quoted attribute. There is an adversarial fixture (<code>fixtures/hostile-payload.threatgraph.json</code>) where every string field carries an XSS attempt; it must render inert. Keep that fixture and keep it in CI.</p>
+</div>
+
+<h3>7.4 Design tokens</h3>
+
+<p>All colour lives in <code>--tc-*</code> custom properties so an embedder can retheme without touching view code. Severity never appears as a hex in a view.</p>
+
+<pre><code>--tc-bg / --tc-panel / --tc-raised / --tc-deep       surfaces
+--tc-hair / --tc-card-fill / --tc-card-border        structure
+--tc-cyan / --tc-violet / --tc-attn                  accents
+--tc-sev-veryhigh #ff7d6b   --tc-sev-high    #f5a08c
+--tc-sev-medium   #ecc55f   --tc-sev-low     #6fbf8f
+--tc-sev-verylow  #4fae9d
+--tc-text #e2e6f5 / --tc-text-2 #8b93b8 / --tc-text-3 #565e84
+--tc-*-rgb variants for rgb(var(--x) / alpha) compositing</code></pre>
+
+<h3>7.5 relevance.ts — the filter that makes real graphs readable</h3>
+
+<pre><code>export function isThreatRelevant(node: Pick&lt;GraphNode, "threats"&gt;): boolean {
+  return (node.threats?.length ?? 0) &gt; 0;
+}
+
+/** "16 of 83 components shown — 67 with no threats hidden" */
+export function relevanceStatus(shown: number, total: number, noun = "components"): string;
+
+/** Same button copy in every view, so the toggle reads as one system. */
+export function relevanceToggleLabel(showingAll: boolean, total: number): string {
+  return showingAll ? "Focus on threats" : `Show all ${total} components`;
+}</code></pre>
+
+<p>A real run's graph is dominated by structural plumbing no threat ever reaches — one live run has 83 nodes of which 16 carry a threat. Drawing all of it by default buries what the views exist to surface. Default to the relevant subset, expose one identically-worded toggle, and <strong>always state the hidden count</strong> — never filter silently.</p>
+
+<h3>7.6 panZoom.ts — one controller, every pannable surface</h3>
+
+<pre><code>export interface PanZoomHandle {
+  getState(): { scale: number; tx: number; ty: number };
+  setScale(scale: number, anchorClientX?: number, anchorClientY?: number): void;
+  fitToContent(w: number, h: number, padding?: number, maxFitScale?: number): void;
+  reset(): void;
+  destroy(): void;
+}
+
+createPanZoom(viewport: HTMLElement, content: HTMLElement, options?): PanZoomHandle;</code></pre>
+
+<p>Pattern: <code>viewport</code> is <code>overflow:hidden</code>, <code>content</code> is absolutely positioned with <code>transform-origin: 0 0</code> and gets its transform driven. Elements that must not start a pan (buttons, clickable nodes) opt out with class <code>tc-no-pan</code>.</p>
+
+<p><code>maxFitScale</code> defaults to 1 — <code>fitToContent</code> will shrink to fit but not magnify, so a small graph renders at native size rather than being blown up.</p>
+
+<h2 class="page-break">8. Writing a view, end to end</h2>
+
+<p>Every view follows the same seven-part shape. This is the actual skeleton, abridged from <code>views/layeredTilt.ts</code>.</p>
+
+<pre><code>// 1. Imports — types, registry, and the shared helpers. Never host code.
+import type { GraphNode, ThreatGraph } from "../types";
+import { registerView, type ViewHandle } from "../registry";
+import { esc } from "../escape";
+import { emit } from "../events";
+import { severityVar, severityRank } from "../severity";
+import { formatEvidence } from "../format";
+import "./myView.css";
+
+const VIEW_NAME  = "my-view";
+const ROOT_CLASS = "tc-view-my-view";
+
+// 2. Static skeleton — no graph data in here, so no escaping needed yet.
+function buildSkeleton(): string {
+  return `
+    &lt;div class="${ROOT_CLASS}"&gt;
+      &lt;div class="mv-caption"&gt;&lt;b&gt;My View&lt;/b&gt; — what question it answers&lt;/div&gt;
+      &lt;div class="mv-stage" data-role="stage"&gt;&lt;/div&gt;
+      &lt;div class="mv-side"   data-role="side"&gt;&lt;/div&gt;
+    &lt;/div&gt;`;
+}
+
+export function mountMyView(hostEl: HTMLElement, initialGraph: ThreatGraph): ViewHandle {
+  let cleanupKeydown: (() =&gt; void) | null = null;
+
+  function mount(graph: ThreatGraph): void {
+    hostEl.classList.add("tc-root");
+    hostEl.innerHTML = buildSkeleton();
+
+    const q = &lt;T extends Element&gt;(role: string): T =&gt; {
+      const found = hostEl.querySelector&lt;T&gt;(`[data-role="${role}"]`);
+      if (!found) throw new Error(`threat-canvas/${VIEW_NAME}: missing [data-role="${role}"]`);
+      return found;
+    };
+    const stage = q&lt;HTMLDivElement&gt;("stage");
+
+    // 3. Honest empty state BEFORE any layout maths.
+    if (graph.nodes.length === 0) {
+      stage.innerHTML = `&lt;div class="mv-empty"&gt;No components in this graph yet.&lt;/div&gt;`;
+      return;
+    }
+
+    // 4. Layout computed FROM the graph. Never a hardcoded coordinate table.
+    const shown = graph.nodes.filter(isThreatRelevant);
+    const geo   = computeLayout(shown, graph.edges);
+
+    // 5. Render. Every graph-derived string through esc().
+    shown.forEach((n) =&gt; {
+      const g = svgEl("g", { class: "mv-node tc-no-pan", tabindex: 0, role: "button",
+                             "aria-label": `${n.id} ${n.label}, severity ${n.severity}` });
+      g.appendChild(svgEl("rect", { x: geo[n.id].x, y: geo[n.id].y,
+                                    width: 152, height: geo[n.id].h,
+                                    stroke: severityVar(n.severity) }));
+      const t = svgEl("text", { x: geo[n.id].x + 11, y: geo[n.id].y + 16 });
+      t.textContent = n.label;              // textContent is safe; innerHTML needs esc()
+      g.appendChild(t);
+
+      // 6. Talk to the host only through events.
+      g.addEventListener("click", () =&gt; emit(hostEl, "node-select", { nodeId: n.id }));
+      stage.appendChild(g);
+    });
+
+    // ESC clears selection — but only claims the key when it cleared something,
+    // so an enclosing fullscreen overlay still gets ESC when nothing is selected.
+    const onKeydown = (e: KeyboardEvent) =&gt; {
+      if (e.key !== "Escape" || selection === null) return;
+      e.preventDefault();
+      clearSelection();
+    };
+    document.addEventListener("keydown", onKeydown);
+    cleanupKeydown = () =&gt; document.removeEventListener("keydown", onKeydown);
+  }
+
+  mount(initialGraph);
+
+  // 7. Lifecycle — update re-mounts, destroy leaves nothing behind.
+  return {
+    el: hostEl,
+    update(graph) { cleanupKeydown?.(); mount(graph); },
+    destroy()     { cleanupKeydown?.(); hostEl.innerHTML = ""; },
+  };
+}
+
+registerView(VIEW_NAME, (el, graph) =&gt; mountMyView(el, graph));</code></pre>
+
+<h3>The SVG helper every view defines</h3>
+<pre><code>const SVGNS = "http://www.w3.org/2000/svg";
+function svgEl&lt;K extends keyof SVGElementTagNameMap&gt;(
+  tag: K, attrs: Record&lt;string, string | number&gt;
+): SVGElementTagNameMap[K] {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) el.setAttribute(k, String(attrs[k]));
+  return el as SVGElementTagNameMap[K];
+}</code></pre>
+
+<h2>9. Host integration — three ways, one source</h2>
+
+<h3>9.1 React (the SPA)</h3>
+<pre><code>export default function ThreatViewHost({ view, graph, onNodeSelect, onEvidenceOpen }) {
+  const hostRef = useRef&lt;HTMLDivElement&gt;(null);
+  const callbacksRef = useRef({ onNodeSelect, onEvidenceOpen });
+  callbacksRef.current = { onNodeSelect, onEvidenceOpen };   // no stale closures
+
+  useEffect(() =&gt; {
+    const el = hostRef.current;
+    if (!el) return;
+    const handle = renderThreatView(el, view, graph);
+
+    const listeners: Array&lt;[string, (e: Event) =&gt; void]&gt; = [
+      ["node-select",   (e) =&gt; callbacksRef.current.onNodeSelect?.((e as CustomEvent).detail)],
+      ["evidence-open", (e) =&gt; callbacksRef.current.onEvidenceOpen?.((e as CustomEvent).detail)],
+    ];
+    listeners.forEach(([t, fn]) =&gt; el.addEventListener(t, fn));
+
+    return () =&gt; {
+      listeners.forEach(([t, fn]) =&gt; el.removeEventListener(t, fn));
+      handle.destroy();
+    };
+  }, [view, graph]);
+
+  return &lt;div ref={hostRef} className="h-full w-full" /&gt;;
+}</code></pre>
+
+<h3>9.2 Custom element (no framework)</h3>
+<pre><code>&lt;rostam-threat-view view="threat-lens"&gt;&lt;/rostam-threat-view&gt;
+&lt;script type="module"&gt;
+  import "threat-canvas";                       // self-registers the element
+  document.querySelector("rostam-threat-view").graph = myGraph;   // property, not attribute
+&lt;/script&gt;</code></pre>
+<p><code>view</code> is an observed attribute so it works declaratively; <code>graph</code> is a property because JSON is too large for an attribute.</p>
+
+<h3>9.3 Direct call</h3>
+<pre><code>const handle = renderThreatView(hostElement, "threat-lens", graph);
+handle.update(newGraph);
+handle.destroy();</code></pre>
+
+<h2 class="page-break">10. Nine things that burned us</h2>
+
+<p>The most valuable section. Each of these shipped, looked fine, and was wrong.</p>
+
+<h3>1 — Hardcoded coordinate tables that only work on the demo fixture</h3>
+<p>Two views shipped with hand-placed <code>POS</code> tables (19 ids) ported from the original mockup. On any other graph most nodes silently never appeared — 19 of 83 on one run — and the "zone boxes" were decorative rather than the graph's real boundaries. It stayed invisible because the only fixture anyone tested with was the mockup the table was copied from, where broken and correct produce <em>identical</em> output. <strong>Compute layout from the graph, always. Assert coverage as a property (<code>expect(drawn).toBe(graph.nodes.length)</code>), never as a pinned number.</strong></p>
+
+<h3>2 — A parser that only worked because of a bug in its input</h3>
+<p>Phase 10 parses Phase 2's mermaid back into edges. One of its regexes existed to absorb an <em>unterminated-quote defect</em> in the LLM output. Fixing the prompt so the output was correct made it simultaneously unparseable — the run went to <strong>0 edges and 1 boundary</strong>, and four views rendered empty. If a downstream parser consumes LLM output, changing the prompt is a breaking change to the parser. Version them together.</p>
+
+<h3>3 — Nodes with no edges destroying a sankey</h3>
+<p>62 of 83 nodes had no ribbon at all. With nothing pointing at them they all landed in layer 0, and that one column stacked to <strong>2900px inside a 640px frame</strong>. Lay out only nodes that carry flow, and state the omitted count.</p>
+
+<h3>4 — Fit-to-content on an extreme aspect ratio</h3>
+<p>22 nodes across 13 stages is naturally an 8:1 band. Fitting that into a 16:9 frame fits on width and wastes 80% of the height. Stretch the layout toward the frame's proportions — scaling node heights <em>and</em> ribbon widths by the same factor, so every encoded proportion is preserved.</p>
+
+<h3>5 — Column pitch narrower than the node</h3>
+<p>When tightening horizontal pitch for deep graphs, floor it at <code>NODE_W + gap</code>. A naive floor overlaps every column.</p>
+
+<h3>6 — ESC belonging to two owners</h3>
+<p>Three views bind ESC on <code>document</code> to clear selection; a fullscreen overlay also exits on ESC. One press did both. Fix: views call <code>preventDefault()</code> <em>only when they actually cleared something</em>, and the outer handler listens on <code>window</code> — events bubble document → window, so it is always last regardless of bind order.</p>
+<div class="callout">
+  <span class="tag">Do not solve this with a microtask</span>
+  <p>Deferring the outer check to <code>queueMicrotask</code> passes in jsdom and fails in a real browser. For a synthetic <code>dispatchEvent</code> all listeners run inside one script frame, so microtasks drain after all of them. For a <strong>trusted keypress the browser takes a microtask checkpoint after each listener</strong>, so the deferred check runs before the inner handler is ever called. Use the structural guarantee (document → window), not a timing one — and drive the real bubble path in the test.</p>
+</div>
+
+<h3>7 — Citation paths off by one directory</h3>
+<p>Models cite relative to the repo root (<code>app/main.py</code>) while the upload root holds the zip's wrapper directory (<code>MyApp/app/main.py</code>) — and they are not consistent: one run resolved 40/40, another 0/33, a third emitted both forms in the same document. <strong>119 of 165 citations were unresolvable.</strong> Fix in the resolver (retry under each top-level directory, same containment check, report which path actually opened), not only in the prompt — a resolver fix is retroactive to runs already on disk.</p>
+
+<h3>8 — Reading a build's exit code through a pipe</h3>
+<p><code>docker compose up --build 2&gt;&amp;1 | tail -8</code> reports <em>tail's</em> exit code. A failed build was reported as a successful deploy. Capture it: <code>cmd &gt; log 2&gt;&amp;1; echo $? &gt; exit</code>. And verify inside the running container, not from the build log.</p>
+
+<h3>9 — Empty states that lie</h3>
+<p>A findings tab read a variable only populated while a <em>different</em> tab was open, so a completed run rendered "No findings yet (Phase 7 not complete)". Distinguish <em>not run yet</em> from <em>ran and produced nothing</em> from <em>ran but could not be parsed</em>. They are three different bugs and one message hides all three.</p>
+
+<h2>11. Build order for a rebuild</h2>
+
+<ol>
+  <li><strong>Schema first.</strong> Write the JSON schema and the TS mirror before any view. Everything negotiates through it.</li>
+  <li><strong>Registry + one view.</strong> Prove <code>renderThreatView → ViewHandle → destroy</code> with the simplest view.</li>
+  <li><strong>Two fixtures, immediately.</strong> A canonical graph and an adversarial one where every string is an XSS attempt. Also keep a <em>degraded</em> fixture (few edges, one boundary) — most layout bugs only appear there.</li>
+  <li><strong>esc() everywhere, from the first line.</strong> Retrofitting escaping across ten views is far worse than starting with it.</li>
+  <li><strong>Tokens before colour.</strong> No hex in a view file, ever.</li>
+  <li><strong>Remaining views.</strong> Each: honest empty state → graph-derived layout → events → lifecycle.</li>
+  <li><strong>A registry-driven acceptance suite</strong> that fails if a view is registered without acceptance config — so view eleven cannot skip the checks.</li>
+  <li><strong>panZoom + fullscreen last</strong>, once you know which surfaces exceed their frame.</li>
+</ol>
+
+<div class="callout callout--key">
+  <span class="tag">If you take one thing</span>
+  <p>Test every view against a graph that is <em>not</em> the one the design was drawn from. Three separate classes of bug in this system — hardcoded coordinates, the sankey stacking, the empty explorer — were all invisible on the demo fixture and obvious on the first real run.</p>
+</div>
+</body>
+</html>
